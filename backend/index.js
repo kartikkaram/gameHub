@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const registerTicTacToe = require('./socket-handlers/ticTacToe');
 
 const app = express();
 app.use(cors()); // Enable CORS for all routes
@@ -21,6 +22,9 @@ const io = new Server(server, {
 const roomParticipants = {}; // { roomId: [ { id: socket.id, username: "Jatin" }, ... ] }
 const socketToRoom = {};     // { socket.id: "roomId" }
 // ----------------------------------------------------
+
+// after const io = new Server(...)
+registerTicTacToe(io);
 
 io.on('connection', (socket) => {
   console.log(`User Connected: ${socket.id}`);
