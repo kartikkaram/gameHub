@@ -43,9 +43,12 @@ io.on('connection', (socket) => {
   console.log(`✅ User Connected: ${socket.id}`);
 
   // ----------------------------------------
-  // Lobby and Room Management
+  // Lobby, Room, and Chat Management
   // ----------------------------------------
 
+  /**
+   * @event join_room - Handles a user joining a specific room.
+   */
   socket.on('join_room', (data) => {
     const { username, roomId } = data;
     socket.join(roomId);
@@ -60,14 +63,32 @@ io.on('connection', (socket) => {
     }
 
     console.log(`🙋‍♂️ User '${username}' (${socket.id}) joined room: ${roomId}`);
+    // Notify others in the room
     socket.to(roomId).emit('user_joined', { username });
+    // Send updated list to everyone
     io.to(roomId).emit('update_participant_list', roomParticipants[roomId]);
   });
   
+  /**
+   * @event send_message - Handles a user sending a chat message to their room.
+   * ✅ THIS IS THE RESTORED CHAT HANDLER
+   */
+  socket.on('send_message', (data) => {
+    const roomId = socketToRoom[socket.id];
+    // Only broadcast if the user is in a valid room
+    if (roomId) {
+      // Emit to everyone else in the room (the sender already added it to their own list)
+      socket.to(roomId).emit('receive_message', data);
+    }
+  });
+
   // ----------------------------------------
   // Invitation and Pre-Game Session Logic
   // ----------------------------------------
 
+  /**
+   * @event create_session - Host creates a session and invites specific players.
+   */
   socket.on('create_session', ({ gameId, invitedPlayerIds }) => {
     const roomId = socketToRoom[socket.id];
     if (!roomId) return;
@@ -103,6 +124,9 @@ io.on('connection', (socket) => {
     }
   });
 
+  /**
+   * @event accept_invite - An invited player accepts and joins the session.
+   */
   socket.on('accept_invite', () => {
     const roomId = socketToRoom[socket.id];
     const session = gameSessions[roomId];
@@ -122,6 +146,9 @@ io.on('connection', (socket) => {
     }
   });
   
+  /**
+   * @event leave_session - A user leaves the current pre-game session.
+   */
   socket.on('leave_session', () => {
     const roomId = socketToRoom[socket.id];
     const session = gameSessions[roomId];
@@ -139,7 +166,8 @@ io.on('connection', (socket) => {
     } else {
       // If a regular player leaves, remove them and notify others in the session.
       session.players = session.players.filter(p => p.id !== socket.id);
-      session.players.forEach(p => {
+      socket.emit('session_ended'); // Tell the leaver to close their session view
+      session.players.forEach(p => { // Tell everyone else
         io.to(p.id).emit('session_updated', session);
       });
     }
@@ -150,6 +178,9 @@ io.on('connection', (socket) => {
   // Game Lifecycle Management
   // ----------------------------------------
 
+  /**
+   * @event start_game - Host starts the game for players in the session.
+   */
   socket.on('start_game', () => {
     const roomId = socketToRoom[socket.id];
     const session = gameSessions[roomId];
@@ -183,9 +214,14 @@ io.on('connection', (socket) => {
     }
 
     delete gameSessions[roomId];
+    // Notify all players in the room to close the session UI.
+    // The game start logic will handle navigation.
     io.to(roomId).emit('session_ended'); 
   });
   
+  /**
+   * @event end_game - A user manually ends an active game (e.g., by returning to the lobby).
+   */
   socket.on('end_game', () => {
     const roomId = socketToRoom[socket.id];
     if (roomId && activeGames[roomId]) {
@@ -200,7 +236,6 @@ io.on('connection', (socket) => {
   // In-Game Action Handlers
   // ----------------------------------------
   
-  // These listeners are for actions that happen *after* a game has started.
   socket.on('uno:getGameState', () => {
     const roomId = socketToRoom[socket.id];
     if (activeGames[roomId] && activeGames[roomId].broadcastGameState) {
@@ -229,6 +264,7 @@ io.on('connection', (socket) => {
     }
   });
   
+  // Register all Tic-Tac-Toe specific game handlers
   ticTacToeModule.registerTicTacToe(io, socket, { roomParticipants, socketToRoom, activeGames });
 
 
@@ -251,12 +287,23 @@ io.on('connection', (socket) => {
       io.to(roomId).emit('update_participant_list', roomParticipants[roomId]);
     }
 
+    // Clean up from pre-game session
     const session = gameSessions[roomId];
-    if (session && session.host.id === socket.id) {
+    if (session) {
+      if (session.host.id === socket.id) {
+        // Host disconnected, kill the session
         delete gameSessions[roomId];
         io.to(roomId).emit('session_ended', { message: 'The host disconnected, cancelling the game.' });
+      } else {
+        // A player disconnected, just remove them from the list and update
+        session.players = session.players.filter(p => p.id !== socket.id);
+        session.players.forEach(p => {
+          io.to(p.id).emit('session_updated', session);
+        });
+      }
     }
 
+    // Clean up from active game
     const game = activeGames[roomId];
     if (game && game.players.find(p => p.id === socket.id)) {
       console.log(`[Game ${roomId}] A player disconnected. Ending the game.`);

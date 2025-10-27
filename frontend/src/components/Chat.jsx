@@ -12,6 +12,19 @@ function Chat() {
   const [participants, setParticipants] = useState([]);
   const [showParticipants, setShowParticipants] = useState(false); // State to toggle view
 
+  const scrollbarHideStyle = {
+    // For Firefox
+    scrollbarWidth: 'none',
+    // For Chrome, Safari, and Opera
+    'msOverflowStyle': 'none', // For IE and Edge
+  };
+
+  const webkitScrollbarHideStyle = `
+    .scrollbar-container::-webkit-scrollbar {
+      display: none;
+    }
+  `;
+
   const sendMessage = async () => {
     if (currentMessage !== "") {
       const messageData = {
@@ -132,7 +145,9 @@ function Chat() {
         </div>
       ) : (
         // --- CHAT MESSAGE VIEW ---
-        <ScrollToBottom className="flex-grow p-4 overflow-y-auto">
+        <>
+        <style>{webkitScrollbarHideStyle}</style>
+        <ScrollToBottom className="flex-grow p-4 overflow-y-auto scrollbar-hide" scrollViewClassName="scrollbar-container">
           {messageList.map((messageContent, index) => {
             if (messageContent.isNotification) {
               return (
@@ -173,6 +188,7 @@ function Chat() {
             );
           })}
         </ScrollToBottom>
+        </>
       )}
 
       {/* Chat Footer - Input */}
