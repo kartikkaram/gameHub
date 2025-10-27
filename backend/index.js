@@ -1,106 +1,276 @@
+/**
+ * @fileoverview Main server entry point for the real-time multiplayer game application.
+ * This file initializes the Express server, configures Socket.IO for WebSocket communication,
+ * and manages all real-time events related to lobbies, chat, game sessions, and gameplay.
+ */
+
+// --- Module Imports ---
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const registerTicTacToe = require('./socket-handlers/ticTacToe');
 
+// --- Game Logic and Handler Imports ---
+const { Game: UnoGame } = require('./games/UNO/unoLogic.js');
+// Import the entire module to access both the handler and helper functions
+const ticTacToeModule = require('./socket-handlers/ticTacToe');
+
+// --- Server Setup ---
 const app = express();
-app.use(cors()); // Enable CORS for all routes
-
+app.use(cors());
 const server = http.createServer(app);
-
-// Initialize Socket.IO and attach it to the server
-// Configure CORS for Socket.IO
 const io = new Server(server, {
   cors: {
-    origin: "http://localhost:5173",
+    origin: "http://localhost:5173", // Your frontend URL
     methods: ["GET", "POST"]
   }
 });
 
-// --- NEW: Server-side state to track participants ---
-const roomParticipants = {}; // { roomId: [ { id: socket.id, username: "Jatin" }, ... ] }
-const socketToRoom = {};     // { socket.id: "roomId" }
-// ----------------------------------------------------
+// =================================================================
+// --- Centralized In-Memory State Management ---
+// =================================================================
 
-// after const io = new Server(...)
-registerTicTacToe(io);
+const roomParticipants = {};
+const socketToRoom = {};
+const activeGames = {};
+const gameSessions = {};
 
+
+// =================================================================
+// --- Main Socket.IO Connection Handler ---
+// =================================================================
 io.on('connection', (socket) => {
-  console.log(`User Connected: ${socket.id}`);
+  console.log(`✅ User Connected: ${socket.id}`);
 
-  // Logic for a user joining a room
+  // ----------------------------------------
+  // Lobby and Room Management
+  // ----------------------------------------
+
   socket.on('join_room', (data) => {
     const { username, roomId } = data;
     socket.join(roomId);
     
-    // --- NEW: Add participant to tracking ---
-    socketToRoom[socket.id] = roomId; // Map socket ID to room ID
-
-    if (!roomParticipants[roomId]) { // If room doesn't exist, create it
+    socketToRoom[socket.id] = roomId; 
+    if (!roomParticipants[roomId]) {
       roomParticipants[roomId] = [];
     }
-
-    // Add new participant (avoiding duplicates)
+    
     if (!roomParticipants[roomId].find(user => user.id === socket.id)) {
       roomParticipants[roomId].push({ id: socket.id, username });
     }
-    // ----------------------------------------
 
     console.log(`🙋‍♂️ User '${username}' (${socket.id}) joined room: ${roomId}`);
-    
-    // Optional: Notify others in the room that a new user has joined
     socket.to(roomId).emit('user_joined', { username });
-
-    // --- NEW: Send the updated participant list to EVERYONE in the room ---
     io.to(roomId).emit('update_participant_list', roomParticipants[roomId]);
-    // ----------------------------------------------------------------------
+  });
+  
+  // ----------------------------------------
+  // Invitation and Pre-Game Session Logic
+  // ----------------------------------------
+
+  socket.on('create_session', ({ gameId, invitedPlayerIds }) => {
+    const roomId = socketToRoom[socket.id];
+    if (!roomId) return;
+
+    const hostInfo = roomParticipants[roomId]?.[0];
+    if (!hostInfo || hostInfo.id !== socket.id) {
+      return socket.emit('error', { message: 'Only the host can create a session.' });
+    }
+    if (activeGames[roomId] || gameSessions[roomId]) {
+      return socket.emit('error', { message: 'A game or session is already active.' });
+    }
+
+    gameSessions[roomId] = {
+      gameId: gameId,
+      host: hostInfo,
+      players: [hostInfo], // Session starts with only the host
+      invited: invitedPlayerIds || [],
+    };
+
+    console.log(`[Session] Host ${hostInfo.username} created a ${gameId} session.`);
+
+    // Inform ONLY THE HOST that their session was created.
+    socket.emit('session_updated', gameSessions[roomId]);
+
+    // Send a private invitation to EACH invited player.
+    if (invitedPlayerIds) {
+      invitedPlayerIds.forEach(playerId => {
+        io.to(playerId).emit('game_invitation', {
+          gameId: gameId,
+          host: hostInfo
+        });
+      });
+    }
   });
 
-  // Logic for receiving and broadcasting a message
-  socket.on('send_message', (data) => {
-    // Emit the received message to all clients in that specific room
-    socket.to(data.roomId).emit('receive_message', data);
-    console.log(`💬 Message sent in room ${data.roomId}: "${data.message}" by ${data.author}`);
+  socket.on('accept_invite', () => {
+    const roomId = socketToRoom[socket.id];
+    const session = gameSessions[roomId];
+    if (!session) return;
+
+    const playerInfo = roomParticipants[roomId].find(p => p.id === socket.id);
+    if (!playerInfo) return;
+
+    if (!session.players.some(p => p.id === playerInfo.id)) {
+      session.players.push(playerInfo);
+      console.log(`[Session] ${playerInfo.username} accepted invite for ${session.gameId}.`);
+
+      // Broadcast the updated session state to ALL players currently in the session.
+      session.players.forEach(p => {
+        io.to(p.id).emit('session_updated', session);
+      });
+    }
+  });
+  
+  socket.on('leave_session', () => {
+    const roomId = socketToRoom[socket.id];
+    const session = gameSessions[roomId];
+    if (!session) return;
+    
+    // If the host leaves, the entire session is cancelled.
+    if (session.host.id === socket.id) {
+      const allSessionPlayers = [...session.players];
+      console.log(`[Session] Host left, cancelling session in room ${roomId}.`);
+      delete gameSessions[roomId];
+      // Notify everyone who was in the session that it has ended.
+      allSessionPlayers.forEach(p => {
+        io.to(p.id).emit('session_ended', { message: 'The host cancelled the game session.' });
+      });
+    } else {
+      // If a regular player leaves, remove them and notify others in the session.
+      session.players = session.players.filter(p => p.id !== socket.id);
+      session.players.forEach(p => {
+        io.to(p.id).emit('session_updated', session);
+      });
+    }
   });
 
-  // Logic for when a user disconnects
+
+  // ----------------------------------------
+  // Game Lifecycle Management
+  // ----------------------------------------
+
+  socket.on('start_game', () => {
+    const roomId = socketToRoom[socket.id];
+    const session = gameSessions[roomId];
+    
+    if (!session || session.host.id !== socket.id) {
+      return socket.emit('error', { message: 'You are not the host or no session is active.' });
+    }
+    
+    const { gameId, players } = session;
+
+    if (gameId === 'tic-tac-toe' && players.length !== 2) {
+      return socket.emit('error', { message: 'Tic-Tac-Toe requires exactly 2 players.' });
+    }
+    if (gameId === 'uno' && (players.length < 2 || players.length > 10)) {
+      return socket.emit('error', { message: `UNO requires 2-10 players, but you have ${players.length}.` });
+    }
+    if (activeGames[roomId]) {
+      return socket.emit('error', { message: 'A game is already in progress in this room.' });
+    }
+
+    console.log(`[Game Start] Starting ${gameId} in room ${roomId} with ${players.length} players.`);
+
+    if (gameId === 'uno') {
+      const gameInstance = new UnoGame(players, roomId, io);
+      activeGames[roomId] = gameInstance;
+      gameInstance.startGame();
+    } else if (gameId === 'tic-tac-toe') {
+      const gameInstance = ticTacToeModule.createGameState(players);
+      activeGames[roomId] = gameInstance;
+      io.to(roomId).emit('tictactoe:gameState', gameInstance);
+    }
+
+    delete gameSessions[roomId];
+    io.to(roomId).emit('session_ended'); 
+  });
+  
+  socket.on('end_game', () => {
+    const roomId = socketToRoom[socket.id];
+    if (roomId && activeGames[roomId]) {
+      console.log(`[Game End] Game in room ${roomId} ended by user request.`);
+      delete activeGames[roomId];
+      io.to(roomId).emit('game_ended', { message: 'A player has returned to the lobby, ending the game.' });
+    }
+  });
+
+
+  // ----------------------------------------
+  // In-Game Action Handlers
+  // ----------------------------------------
+  
+  // These listeners are for actions that happen *after* a game has started.
+  socket.on('uno:getGameState', () => {
+    const roomId = socketToRoom[socket.id];
+    if (activeGames[roomId] && activeGames[roomId].broadcastGameState) {
+      activeGames[roomId].broadcastGameState();
+    }
+  });
+  
+  socket.on('uno:playCard', (data) => {
+    const roomId = socketToRoom[socket.id];
+    if (activeGames[roomId] && activeGames[roomId].playCard) {
+      activeGames[roomId].playCard(socket.id, data.card, data.chosenColor);
+    }
+  });
+
+  socket.on('uno:drawCard', () => {
+    const roomId = socketToRoom[socket.id];
+    if (activeGames[roomId] && activeGames[roomId].drawCard) {
+      activeGames[roomId].drawCard(socket.id);
+    }
+  });
+
+  socket.on('uno:declareUno', () => {
+    const roomId = socketToRoom[socket.id];
+    if (activeGames[roomId] && activeGames[roomId].declareUno) {
+      activeGames[roomId].declareUno(socket.id);
+    }
+  });
+  
+  ticTacToeModule.registerTicTacToe(io, socket, { roomParticipants, socketToRoom, activeGames });
+
+
+  // ----------------------------------------
+  // Disconnection Handling
+  // ----------------------------------------
+
   socket.on('disconnect', () => {
     console.log(`❌ User Disconnected: ${socket.id}`);
-    
-    // --- NEW: Handle participant list on disconnect ---
-    const roomId = socketToRoom[socket.id]; // Find which room the socket was in
+    const roomId = socketToRoom[socket.id];
+    if (!roomId) return;
 
-    if (roomId && roomParticipants[roomId]) {
-      // Find the user who is leaving
-      const leavingUser = roomParticipants[roomId].find(user => user.id === socket.id);
-
-      // Remove the user from the room's participant list
-      roomParticipants[roomId] = roomParticipants[roomId].filter(
-        (user) => user.id !== socket.id
-      );
-
-      // Notify the room that the user has left
+    let leavingUser = null;
+    if (roomParticipants[roomId]) {
+      leavingUser = roomParticipants[roomId].find(user => user.id === socket.id);
+      roomParticipants[roomId] = roomParticipants[roomId].filter(user => user.id !== socket.id);
       if (leavingUser) {
         socket.to(roomId).emit('user_left', { username: leavingUser.username });
       }
-
-      // Send the updated (smaller) participant list to everyone
       io.to(roomId).emit('update_participant_list', roomParticipants[roomId]);
+    }
 
-      // Optional: Clean up the room if it's empty
-      if (roomParticipants[roomId].length === 0) {
-        delete roomParticipants[roomId];
-      }
+    const session = gameSessions[roomId];
+    if (session && session.host.id === socket.id) {
+        delete gameSessions[roomId];
+        io.to(roomId).emit('session_ended', { message: 'The host disconnected, cancelling the game.' });
+    }
+
+    const game = activeGames[roomId];
+    if (game && game.players.find(p => p.id === socket.id)) {
+      console.log(`[Game ${roomId}] A player disconnected. Ending the game.`);
+      delete activeGames[roomId];
+      const username = leavingUser ? leavingUser.username : 'A player';
+      io.to(roomId).emit('game_ended', { message: `${username} disconnected. The game has ended.` });
     }
     
-    // Clean up the socket-to-room mapping
     delete socketToRoom[socket.id];
-    // ------------------------------------------------
   });
 });
 
+// --- Server Initialization ---
 const PORT = 3001;
 server.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`🚀 Server is running on port ${PORT}`);
 });

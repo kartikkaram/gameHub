@@ -1,47 +1,58 @@
 import React from 'react';
-import { useParams, Link, useOutletContext } from 'react-router-dom';
+// ✅ Import useNavigate
+import { Link, useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
+// ✅ Import useSocket
+import { useSocket } from '../socketContext'; 
 
-// ✅ Import all your game components here
-import TicTacToe from '../components/TicTacToe/TicTacToe'; // adjust path if needed
+// Import all your game components
+import UnoGame from '../components/Uno/UnoGame';
+import TicTacToe from '../components/TicTacToe/TicTacToe';
 
 function GamePage() {
-  const { gameId } = useParams();
-  const { socket, username, roomId } = useOutletContext();
+  const { roomId, gameId } = useParams();
+  // ✅ Get socket and username from context
+  const { socket, username } = useSocket();
+  // ✅ Get the navigate function
+  const navigate = useNavigate();
 
-  // ✅ Map game IDs to components
   const games = {
-    'tic-tac-toe': <TicTacToe />,  // this one exists now
-    // later you can add more:
-    // 'chess': <ChessGame />,
-    // 'uno': <UnoGame />,
+    'tic-tac-toe': <TicTacToe />,
+    'uno': <UnoGame />,
   };
 
-  // ✅ Select the right component based on URL
-  const CurrentGame = games[gameId] || (
-    <p className="text-gray-300">Game not found or not implemented yet.</p>
-  );
+  const CurrentGame = games[gameId] || <p className="text-gray-300">Game not found: {gameId}</p>;
+
+  // ✅ CREATE THIS HANDLER
+  const handleBackToLobby = () => {
+    if (socket) {
+      // Tell the server to clean up the game state for this room
+      socket.emit('end_game');
+    }
+    // Navigate back to the lobby page
+    navigate(`/room/${roomId}`);
+  };
 
   return (
-    <div className="text-white">
-      <Link
-        to={`/room/${roomId}`}
+    <div className="text-white max-w-6xl mx-auto p-4">
+      {/* ✅ CHANGE THIS FROM A <Link> TO A <button> THAT USES THE HANDLER */}
+      <button
+        onClick={handleBackToLobby}
         className="inline-flex items-center gap-2 text-blue-400 hover:text-blue-300 mb-6"
       >
         <ArrowLeft size={20} />
         Back to Lobby
-      </Link>
+      </button>
 
       <h1 className="text-4xl font-bold mb-6 capitalize">
-        {gameId.replace('-', ' ')}
+        {gameId ? gameId.replace('-', ' ') : 'Game'}
       </h1>
 
-      <div className="bg-gray-800 p-8 rounded-lg shadow-lg min-h-[60vh]">
+      <div className="bg-gray-800 p-4 sm:p-8 rounded-lg shadow-lg min-h-[60vh]">
         <p className="text-lg mb-2">
-          Welcome, <span className="font-bold">{username}</span>!
+          Welcome, <span className="font-bold">{username || 'Player'}</span>!
         </p>
 
-        {/* ✅ Here’s where your actual game renders */}
         <div className="mt-4">
           {CurrentGame}
         </div>

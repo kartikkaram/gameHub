@@ -1,173 +1,155 @@
+/**
+ * Tic Tac Toe Game Logic Handler
+ * This function attaches all Tic Tac Toe related event listeners to a socket.
+ * * @param {object} io - The main Socket.IO server instance.
+ * @param {object} socket - The individual socket instance for a connected user.
+ * @param {object} state - A reference to the shared server state.
+ * @param {object} state.roomParticipants - { roomId: [ { id, username }, ... ] }
+ * @param {object} state.socketToRoom - { socketId: roomId }
+ * @param {object} state.activeGames - { roomId: gameInstance }
+ */
 
-module.exports = function registerTicTacToe(io) {
-  const games = new Map(); // roomId -> gameState
+const createGameState = (players) => {
+  return {
+    gameType: 'TicTacToe',
+    board: Array(9).fill(null),
+    players: [
+      { id: players[0].id, username: players[0].username, mark: 'X' },
+      { id: players[1].id, username: players[1].username, mark: 'O' }
+    ],
+    turn: 'X',
+    status: 'playing',
+    winner: null,
+    winningLine: null,
+    rematchRequests: new Set(),
+  };
+};
 
-  function createGameState() {
-    return {
-      board: Array(9).fill(null),
-      players: { X: null, O: null }, // socket.id
-      turn: 'X',
-      status: 'waiting', // 'waiting' | 'playing' | 'ended'
-      winner: null,      // 'X' | 'O' | 'draw' | null
-      winningLine: null,
-      rematchRequests: new Set(),
-    };
-  }
 
-  function checkWinner(board) {
+function registerTicTacToe(io, socket, state) {
+
+  // --- Helper Functions (specific to Tic Tac Toe) ---
+
+  const checkWinner = (board) => {
     const lines = [
-      [0,1,2],[3,4,5],[6,7,8],
-      [0,3,6],[1,4,7],[2,5,8],
-      [0,4,8],[2,4,6]
+      [0, 1, 2], [3, 4, 5], [6, 7, 8], // Rows
+      [0, 3, 6], [1, 4, 7], [2, 5, 8], // Columns
+      [0, 4, 8], [2, 4, 6]             // Diagonals
     ];
     for (const line of lines) {
-      const [a,b,c] = line;
+      const [a, b, c] = line;
       if (board[a] && board[a] === board[b] && board[a] === board[c]) {
         return { winner: board[a], line };
       }
     }
     if (board.every(cell => cell !== null)) return { winner: 'draw', line: null };
     return { winner: null, line: null };
-  }
+  };
 
-  function sanitizeGame(game) {
-    return {
-      board: game.board.slice(),
-      players: {
-        X: game.players.X ? 'taken' : null,
-        O: game.players.O ? 'taken' : null,
-      },
-      turn: game.turn,
-      status: game.status,
-      winner: game.winner,
-      winningLine: game.winningLine,
-      rematchCount: game.rematchRequests.size,
-    };
-  }
+  // --- Socket Event Listeners ---
 
-  io.on('connection', (socket) => {
-    // join a room + mark player slot
-    socket.on('join-game', ({ roomId }) => {
-      if (!roomId) return socket.emit('game-error', { msg: 'roomId required' });
+  /**
+   * Host starts the Tic Tac Toe game for the room.
+   */
+  socket.on('tictactoe:start', () => {
+    const roomId = state.socketToRoom[socket.id];
+    if (!roomId) return;
+    
+    // Use shared state to get participants and check rules
+    const participants = state.roomParticipants[roomId];
 
-      socket.join(roomId);
+    if (state.activeGames[roomId]) {
+      return socket.emit('error', { message: 'A game is already in progress.' });
+    }
+    if (!participants || participants[0].id !== socket.id) {
+      return socket.emit('error', { message: 'Only the room host can start the game.' });
+    }
+    if (participants.length !== 2) {
+      return socket.emit('error', { message: 'Tic Tac Toe requires exactly 2 players.' });
+    }
+    
+    console.log(`[Server] Starting Tic Tac Toe game in room ${roomId}`);
+    const game = createGameState(participants);
+    state.activeGames[roomId] = game; // CHANGED: Use the shared activeGames object
 
-      let game = games.get(roomId);
-      if (!game) {
-        game = createGameState();
-        games.set(roomId, game);
-      }
+    io.to(roomId).emit('tictactoe:gameState', game);
+  });
 
-      // if socket already assigned, send state
-      if (game.players.X === socket.id || game.players.O === socket.id) {
-        socket.emit('player-assigned', { mark: game.players.X === socket.id ? 'X' : 'O' });
-        socket.emit('game-state', sanitizeGame(game));
-        return;
-      }
+  /**
+   A player's client has loaded and is requesting the current game state.
+   */
+  socket.on('tictactoe:requestState', () => {
+    const roomId = state.socketToRoom[socket.id];
+    if (!roomId) return;
 
-      // assign X/O or spectator
-      if (!game.players.X) {
-        game.players.X = socket.id;
-        socket.emit('player-assigned', { mark: 'X' });
-      } else if (!game.players.O) {
-        game.players.O = socket.id;
-        socket.emit('player-assigned', { mark: 'O' });
-      } else {
-        socket.emit('player-assigned', { mark: 'spectator' });
-      }
+    const game = state.activeGames[roomId];
 
-      // start when both players present
-      if (game.players.X && game.players.O && game.status !== 'playing') {
-        game.status = 'playing';
-        game.turn = 'X';
-        game.winner = null;
-        game.winningLine = null;
-        game.rematchRequests.clear();
-      }
+    // If a TicTacToe game exists for this room, send its state to the requesting player.
+    if (game && game.gameType === 'TicTacToe') {
+      socket.emit('tictactoe:gameState', game);
+    }
+  });
 
-      io.to(roomId).emit('game-state', sanitizeGame(game));
-    });
+  /**
+   * Player makes a move.
+   */
+  socket.on('tictactoe:makeMove', ({ index }) => {
+    const roomId = state.socketToRoom[socket.id];
+    const game = state.activeGames[roomId];
 
-    socket.on('make-move', ({ roomId, index }) => {
-      const game = games.get(roomId);
-      if (!game) return socket.emit('game-error', { msg: 'Game not found' });
-      if (game.status !== 'playing') return socket.emit('game-error', { msg: 'Game not in playing state' });
+    // Basic validations
+    if (!game || game.gameType !== 'TicTacToe') return;
+    if (game.status !== 'playing') return;
 
-      const playerMark = game.players.X === socket.id ? 'X' : (game.players.O === socket.id ? 'O' : null);
-      if (!playerMark) return socket.emit('game-error', { msg: 'Spectators cannot move' });
-      if (playerMark !== game.turn) return socket.emit('game-error', { msg: 'Not your turn' });
-      if (typeof index !== 'number' || index < 0 || index > 8 || game.board[index] !== null) {
-        return socket.emit('game-error', { msg: 'Invalid move' });
-      }
+    const player = game.players.find(p => p.id === socket.id);
+    if (!player) return; // Spectator check
+    if (player.mark !== game.turn) return socket.emit('error', { message: 'Not your turn.' });
+    if (typeof index !== 'number' || index < 0 || index > 8 || game.board[index] !== null) {
+      return socket.emit('error', { message: 'Invalid move.' });
+    }
 
-      game.board[index] = playerMark;
-      const { winner, line } = checkWinner(game.board);
-      if (winner) {
-        game.status = 'ended';
-        game.winner = winner;
-        game.winningLine = line;
-        io.to(roomId).emit('game-state', sanitizeGame(game));
-        io.to(roomId).emit('game-ended', { winner, winningLine: line });
-        return;
-      }
-
+    // Apply move and check for winner
+    game.board[index] = player.mark;
+    const { winner, line } = checkWinner(game.board);
+    
+    if (winner) {
+      game.status = 'ended';
+      game.winner = winner;
+      game.winningLine = line;
+      // Use the generic 'game_ended' event for the client to handle
+      io.to(roomId).emit('game_ended', { winner, winningLine: line });
+    } else {
       game.turn = game.turn === 'X' ? 'O' : 'X';
-      io.to(roomId).emit('game-state', sanitizeGame(game));
-    });
+    }
 
-    socket.on('request-restart', ({ roomId }) => {
-      const game = games.get(roomId);
-      if (!game) return;
-      game.rematchRequests.add(socket.id);
+    io.to(roomId).emit('tictactoe:gameState', game);
+  });
+  
+  /**
+   * A player requests a rematch.
+   */
+  socket.on('tictactoe:requestRematch', () => {
+    const roomId = state.socketToRoom[socket.id];
+    const game = state.activeGames[roomId];
+    if (!game || game.gameType !== 'TicTacToe' || game.status !== 'ended') return;
 
-      if (game.players.X && game.players.O &&
-          game.rematchRequests.has(game.players.X) &&
-          game.rematchRequests.has(game.players.O)) {
-        const nextStarter = game.turn === 'X' ? 'O' : 'X';
-        game.board = Array(9).fill(null);
-        game.status = 'playing';
-        game.winner = null;
-        game.winningLine = null;
-        game.rematchRequests.clear();
-        game.turn = nextStarter;
-        io.to(roomId).emit('game-state', sanitizeGame(game));
-      } else {
-        io.to(roomId).emit('game-state', sanitizeGame(game));
-      }
-    });
+    const player = game.players.find(p => p.id === socket.id);
+    if (!player) return; // Only players can request a rematch
 
-    socket.on('leave-game', ({ roomId }) => {
-      const game = games.get(roomId);
-      if (!game) return;
-      if (game.players.X === socket.id) game.players.X = null;
-      if (game.players.O === socket.id) game.players.O = null;
-      game.status = 'waiting';
-      game.rematchRequests.delete(socket.id);
+    game.rematchRequests.add(socket.id);
 
-      if (!game.players.X && !game.players.O) games.delete(roomId);
-      else io.to(roomId).emit('game-state', sanitizeGame(game));
-
-      socket.leave(roomId);
-    });
-
-    socket.on('request-sync', ({ roomId }) => {
-      const game = games.get(roomId);
-      if (game) socket.emit('game-state', sanitizeGame(game));
-    });
-
-    socket.on('disconnect', () => {
-      // clean up: remove socket from any games where present
-      for (const [roomId, game] of games.entries()) {
-        let changed = false;
-        if (game.players.X === socket.id) { game.players.X = null; changed = true; }
-        if (game.players.O === socket.id) { game.players.O = null; changed = true; }
-        if (changed) {
-          game.status = 'waiting';
-          game.rematchRequests.delete(socket.id);
-          if (!game.players.X && !game.players.O) games.delete(roomId);
-          else io.to(roomId).emit('game-state', sanitizeGame(game));
-        }
-      }
-    });
+    // If both players have requested a rematch, reset the game
+    if (game.rematchRequests.size === 2) {
+      console.log(`[Server] Rematching Tic Tac Toe in room ${roomId}`);
+      const newGame = createGameState(game.players.reverse()); // Swap who starts
+      state.activeGames[roomId] = newGame;
+      io.to(roomId).emit('tictactoe:gameState', newGame);
+    } else {
+      // Notify others that one player wants a rematch
+      io.to(roomId).emit('tictactoe:rematchRequested', { userId: socket.id });
+    }
   });
 };
+
+
+module.exports = { registerTicTacToe, createGameState };
