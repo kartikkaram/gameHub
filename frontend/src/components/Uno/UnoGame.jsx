@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useSocket } from '../../SocketContext';
+import { ArrowRightLeft, Ban, Plus, Gem } from 'lucide-react';
 
 // --- Helper Function ---
 // This function checks if a card is legally playable
@@ -11,30 +12,86 @@ function isCardPlayable(card, discardTop, currentColor) {
   return false;
 }
 
-// --- Card Component ---
+/**
+ * @description Renders the appropriate symbol (number or icon) for a card's value.
+ */
+// =================================================================
+// --- Card Symbol Component (Minor adjustment for +2/+4 size) ---
+// =================================================================
+function CardSymbol({ value, className }) {
+  const iconProps = { className, strokeWidth: 2.5 };
+  switch (value) {
+    case 'reverse':
+      return <ArrowRightLeft {...iconProps} />;
+    case 'skip':
+      return <Ban {...iconProps} />;
+    case 'drawTwo':
+      // Adjusted class for +2 to make Plus icon smaller
+      return <div className={`flex items-center justify-center ${className}`}><Plus size="80%" color='black' /></div>;
+    case 'wild':
+      return <Gem {...iconProps} />;
+    case 'drawFour':
+      // Adjusted class for +4 to make Plus icon smaller and '4' visible
+      return <div className={`flex items-center justify-center ${className}`}><Plus size="80%" color='black' /><span className="text-xl -ml-1 mt-1 font-black">4</span></div>;
+    default:
+      return <span className={className}>{value}</span>;
+  }
+}
+// =================================================================
+// --- UPDATED: UnoCard Component ---
+// =================================================================
 function UnoCard({ card, onClick, isPlayable, isMyTurn }) {
-  const cardColorClass = {
-    red: 'bg-red-500', yellow: 'bg-yellow-400 text-black',
-    green: 'bg-green-500', blue: 'bg-blue-500', wild: 'bg-gray-700'
+  const cardColors = {
+    red: { bg: 'bg-red-600', text: 'text-red-600' },
+    yellow: { bg: 'bg-yellow-400', text: 'text-yellow-400' },
+    green: { bg: 'bg-green-500', text: 'text-green-500' },
+    blue: { bg: 'bg-blue-600', text: 'text-blue-600' },
+    wild: { bg: 'bg-gray-800', text: 'text-white' }, // Text color for wild will be dynamic
   };
 
   const isDisabled = !isMyTurn || !isPlayable;
+  const { bg, text } = cardColors[card.color];
+  const textColor = card.color === 'yellow' ? 'text-black' : 'text-white';
 
   return (
     <button
       onClick={onClick}
       disabled={isDisabled}
-      className={`w-24 h-36 m-1 rounded-lg text-white font-bold text-xl shadow-lg flex flex-col justify-between p-2 transition-all duration-150
-        ${cardColorClass[card.color]} 
+      className={`
+        relative w-24 h-36 m-1 rounded-xl font-bold shadow-lg
+        flex items-center justify-center overflow-hidden
+        transition-all duration-150 transform
+        ${bg} 
         ${isDisabled
-          ? 'opacity-50 cursor-not-allowed grayscale-[50%]'
-          : 'cursor-pointer hover:-translate-y-2 hover:ring-4 hover:ring-white'
+          ? 'opacity-60 cursor-not-allowed grayscale-[50%]'
+          : 'cursor-pointer hover:-translate-y-2 hover:shadow-2xl'
         }
       `}
     >
-      <span className="self-start">{card.value}</span>
-      <span className="text-3xl">{card.value}</span>
-      <span className="self-end rotate-180">{card.value}</span>
+      {/* Angled White Oval */}
+      <div className="absolute w-[140%] h-[75%] bg-white transform -rotate-[35deg] rounded-[50%] z-0" />
+
+      {/* Center Symbol */}
+      <div className="relative z-10">
+        <CardSymbol
+          value={card.value}
+          className={`
+            ${card.color === 'wild' ? 'text-transparent bg-clip-text bg-gradient-to-r from-red-500 via-blue-500 to-yellow-400' : text}
+            text-6xl flex items-center justify-center font-black
+            drop-shadow-[3px_3px_2px_rgba(0,0,0,0.4)]
+          `}
+        />
+      </div>
+
+      {/* Top-Left Corner Symbol */}
+      <div className={`absolute top-2 left-2 z-10 ${textColor}`}>
+        <CardSymbol value={card.value} className="text-xl" />
+      </div>
+
+      {/* Bottom-Right Corner Symbol */}
+      <div className={`absolute bottom-2 right-2 z-10 transform rotate-180 ${textColor}`}>
+        <CardSymbol value={card.value} className="text-xl" />
+      </div>
     </button>
   );
 }
